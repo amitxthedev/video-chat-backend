@@ -1,3 +1,4 @@
+const textChatHandler = require("./socket/textChat");
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -7,16 +8,17 @@ const app = express();
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: {
-    origin: "*",
-  },
+  cors: { origin: "*" },
 });
 
-/* ================== MATCHMAKING STATE ================== */
+/* ================== STATE ================== */
 const waitingQueue = [];
 const activeRooms = new Map(); // socketId -> roomId
 const rooms = new Map();       // roomId -> [socketId, socketId]
 const lastPartner = new Map();
+const userInfo = new Map();    // socketId -> location
+
+let onlineUsers = 0;
 
 /* ================== HELPERS ================== */
 function removeFromQueue(id) {
@@ -31,7 +33,7 @@ function getPartner(socketId) {
   return users.find((u) => u !== socketId) || null;
 }
 
-/* ================== MATCH FUNCTION ================== */
+/* ================== MATCH ================== */
 function tryMatch() {
   if (waitingQueue.length < 2) return;
 
@@ -52,16 +54,36 @@ function tryMatch() {
   lastPartner.set(user1, user2);
   lastPartner.set(user2, user1);
 
-  io.to(user1).emit("partner-found", { initiator: true });
-  io.to(user2).emit("partner-found", { initiator: false });
+  io.to(user1).emit("partner-found", {
+    initiator: true,
+    partner: userInfo.get(user2),
+  });
+
+  io.to(user2).emit("partner-found", {
+    initiator: false,
+    partner: userInfo.get(user1),
+  });
 
   console.log("✅ Matched:", user1, "<->", user2);
 }
 
-/* ================== SOCKET EVENTS ================== */
+/* ================== SOCKET ================== */
 io.on("connection", (socket) => {
   console.log("🟢 Connected:", socket.id);
 
+  /* ===== ONLINE COUNT ===== */
+  onlineUsers++;
+  io.emit("online-count", onlineUsers);
+
+  /* ===== STORE LOCATION ===== */
+  socket.on("join", (location) => {
+    userInfo.set(socket.id, location);
+  });
+
+  /* ===== TEXT CHAT ===== */
+  textChatHandler(io, socket, activeRooms, rooms);
+
+  /* ===== FIND VIDEO PARTNER ===== */
   socket.on("find-partner", () => {
     removeFromQueue(socket.id);
 
@@ -72,7 +94,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  /* ===== WEBRTC SIGNALING (FIX) ===== */
+  /* ===== WEBRTC SIGNALING ===== */
   socket.on("offer", (offer) => {
     const partner = getPartner(socket.id);
     if (partner) io.to(partner).emit("offer", offer);
@@ -115,11 +137,16 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     console.log("🔴 Disconnected:", socket.id);
 
+    onlineUsers--;
+    io.emit("online-count", onlineUsers);
+
     removeFromQueue(socket.id);
+
     const roomId = activeRooms.get(socket.id);
     const partner = getPartner(socket.id);
 
     activeRooms.delete(socket.id);
+    userInfo.delete(socket.id);
     lastPartner.delete(socket.id);
 
     if (partner) {
@@ -133,9 +160,8 @@ io.on("connection", (socket) => {
   });
 });
 
-/* ================== START SERVER ================== */
+/* ================== START ================== */
 const PORT = process.env.PORT || 5000;
-
 server.listen(PORT, () => {
   console.log(`🚀 Backend running on http://localhost:${PORT}`);
 });
