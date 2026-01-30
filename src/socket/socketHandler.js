@@ -10,21 +10,23 @@ module.exports = function socketHandler(io) {
 
     /* ================= USER JOIN ================= */
 
-    socket.on("join", ({ country, state }) => {
+    socket.on("join", ({ country, state, chatType }) => {
       socket.country = country || "Unknown";
       socket.state = state || "Unknown";
+      socket.chatType = chatType || "video"; // Default to video
 
       console.log(
-        `📍 ${socket.id} joined from ${socket.country}, ${socket.state}`
+        `📍 ${socket.id} joined from ${socket.country}, ${socket.state} [${socket.chatType}]`
       );
     });
 
     /* ================= FIND PARTNER ================= */
 
     socket.on("find-partner", () => {
-      console.log("🔍 Find partner:", socket.id);
+      const chatType = socket.chatType || "video";
+      console.log(`🔍 Find partner [${chatType}]:`, socket.id);
 
-      const partner = matchUser(socket);
+      const partner = matchUser(socket, chatType);
 
       if (partner) {
         socket.partner = partner;
@@ -46,11 +48,11 @@ module.exports = function socketHandler(io) {
           },
         });
 
-        console.log(`🤝 Matched ${socket.id} with ${partner.id}`);
+        console.log(`🤝 Matched ${socket.id} with ${partner.id} [${chatType}]`);
       } else {
-        addToQueue(socket);
+        addToQueue(socket, chatType);
         socket.emit("waiting");
-        console.log("⏳ Waiting:", socket.id);
+        console.log(`⏳ Waiting [${chatType}]:`, socket.id);
       }
     });
 
@@ -71,7 +73,8 @@ module.exports = function socketHandler(io) {
     /* ================= SKIP / NEXT ================= */
 
     socket.on("skip", () => {
-      console.log("⏭ Skip requested:", socket.id);
+      const chatType = socket.chatType || "video";
+      console.log(`⏭ Skip requested [${chatType}]:`, socket.id);
 
       if (socket.partner) {
         socket.partner.emit("partner-left");
@@ -80,7 +83,7 @@ module.exports = function socketHandler(io) {
 
       socket.partner = null;
       removeFromQueue(socket);
-      addToQueue(socket);
+      addToQueue(socket, chatType);
       socket.emit("waiting");
     });
 
