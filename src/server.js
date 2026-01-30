@@ -12,18 +12,23 @@ const io = new Server(server, {
 });
 
 /* ================== STATE ================== */
-const waitingQueue = [];
+// SEPARATE QUEUES FOR VIDEO AND TEXT CHAT (CRITICAL FOR ISOLATION)
+const videoWaitingQueue = [];  // Only video chat users
+const textWaitingQueue = [];   // Only text chat users
 const activeRooms = new Map(); // socketId -> roomId
 const rooms = new Map();       // roomId -> [socketId, socketId]
 const lastPartner = new Map();
 const userInfo = new Map();    // socketId -> location
+const socketChatType = new Map(); // socketId -> "video" | "text"
 
 let onlineUsers = 0;
 
 /* ================== HELPERS ================== */
 function removeFromQueue(id) {
-  const i = waitingQueue.indexOf(id);
-  if (i !== -1) waitingQueue.splice(i, 1);
+  const chatType = socketChatType.get(id);
+  const queue = chatType === "text" ? textWaitingQueue : videoWaitingQueue;
+  const i = queue.indexOf(id);
+  if (i !== -1) queue.splice(i, 1);
 }
 
 function getPartner(socketId) {
@@ -34,18 +39,20 @@ function getPartner(socketId) {
 }
 
 /* ================== MATCH ================== */
-function tryMatch() {
-  if (waitingQueue.length < 2) return;
+function tryMatch(chatType = "video") {
+  const queue = chatType === "text" ? textWaitingQueue : videoWaitingQueue;
+  
+  if (queue.length < 2) return;
 
-  const user1 = waitingQueue.shift();
+  const user1 = queue.shift();
 
-  let index = waitingQueue.findIndex(
+  let index = queue.findIndex(
     (u) => lastPartner.get(u) !== user1
   );
   if (index === -1) index = 0;
 
-  const user2 = waitingQueue.splice(index, 1)[0];
-  const roomId = `room_${Date.now()}_${Math.random()}`;
+  const user2 = queue.splice(index, 1)[0];
+  const roomId = `room_${chatType}_${Date.now()}_${Math.random()}`;
 
   activeRooms.set(user1, roomId);
   activeRooms.set(user2, roomId);
@@ -64,7 +71,7 @@ function tryMatch() {
     partner: userInfo.get(user1),
   });
 
-  console.log("✅ Matched:", user1, "<->", user2);
+  console.log(`✅ Matched [${chatType}]:`, user1, "<->", user2);
 }
 
 /* ================== SOCKET ================== */
@@ -75,22 +82,36 @@ io.on("connection", (socket) => {
   onlineUsers++;
   io.emit("online-count", onlineUsers);
 
-  /* ===== STORE LOCATION ===== */
-  socket.on("join", (location) => {
-    userInfo.set(socket.id, location);
+  /* ===== STORE LOCATION AND CHAT TYPE ===== */
+  socket.on("join", ({ country, state, chatType }) => {
+    // Store location info
+    userInfo.set(socket.id, {
+      country: country || "Unknown",
+      state: state || "Unknown",
+    });
+    // CRITICAL: Store chat type (default to "video" if not provided)
+    const type = chatType === "text" ? "text" : "video";
+    socketChatType.set(socket.id, type);
+    
+    console.log(`📍 ${socket.id} joined [${type}] from ${country}, ${state}`);
   });
 
   /* ===== TEXT CHAT ===== */
   textChatHandler(io, socket, activeRooms, rooms);
 
-  /* ===== FIND VIDEO PARTNER ===== */
+  /* ===== FIND PARTNER (VIDEO OR TEXT) ===== */
   socket.on("find-partner", () => {
+    // Get the chat type for this socket
+    const chatType = socketChatType.get(socket.id) || "video";
+    const queue = chatType === "text" ? textWaitingQueue : videoWaitingQueue;
+    
     removeFromQueue(socket.id);
 
     if (!activeRooms.has(socket.id)) {
-      waitingQueue.push(socket.id);
+      queue.push(socket.id);
       socket.emit("waiting");
-      tryMatch();
+      console.log(`⏳ ${socket.id} waiting [${chatType}]`);
+      tryMatch(chatType);
     }
   });
 
@@ -112,6 +133,7 @@ io.on("connection", (socket) => {
 
   /* ===== SKIP ===== */
   socket.on("skip", () => {
+    const chatType = socketChatType.get(socket.id) || "video";
     const roomId = activeRooms.get(socket.id);
     if (!roomId) return;
 
@@ -123,20 +145,24 @@ io.on("connection", (socket) => {
     if (partner) {
       activeRooms.delete(partner);
       io.to(partner).emit("partner-left");
-      waitingQueue.push(partner);
+      const partnerQueue = chatType === "text" ? textWaitingQueue : videoWaitingQueue;
+      partnerQueue.push(partner);
     }
 
     rooms.delete(roomId);
 
-    waitingQueue.push(socket.id);
+    const queue = chatType === "text" ? textWaitingQueue : videoWaitingQueue;
+    queue.push(socket.id);
     socket.emit("waiting");
-    tryMatch();
+    console.log(`⏳ ${socket.id} waiting again [${chatType}]`);
+    tryMatch(chatType);
   });
 
   /* ===== DISCONNECT ===== */
   socket.on("disconnect", () => {
     console.log("🔴 Disconnected:", socket.id);
 
+    const chatType = socketChatType.get(socket.id) || "video";
     onlineUsers--;
     io.emit("online-count", onlineUsers);
 
@@ -147,13 +173,15 @@ io.on("connection", (socket) => {
 
     activeRooms.delete(socket.id);
     userInfo.delete(socket.id);
+    socketChatType.delete(socket.id);
     lastPartner.delete(socket.id);
 
     if (partner) {
       activeRooms.delete(partner);
       io.to(partner).emit("partner-left");
-      waitingQueue.push(partner);
-      tryMatch();
+      const queue = chatType === "text" ? textWaitingQueue : videoWaitingQueue;
+      queue.push(partner);
+      tryMatch(chatType);
     }
 
     if (roomId) rooms.delete(roomId);
